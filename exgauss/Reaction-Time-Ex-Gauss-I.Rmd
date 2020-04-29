@@ -31,7 +31,9 @@ interactive = T
 set.seed(2121)
 ```
 
-All code can be found in rmarkdown documents on Github [https://github.com/SRSteinkamp/ReactionTimeWrangling/exgauss](https://github.com/SRSteinkamp/ReactionTimeWrangling/exgauss/) 
+All code can be found in rmarkdown documents on Github [https://github.com/SRSteinkamp/ReactionTimeWrangling/exgauss](https://github.com/SRSteinkamp/ReactionTimeWrangling/exgauss/)
+
+
 # The (not so) easy task of analysing reaction times.
 
 Analyzing reaction times has a long history in psychology and (cognitive) neuroscience. Most people who studied Psychology in university have conducted a classical psychological experiments. For example investigating the [Stroop task](https://en.wikipedia.org/wiki/Stroop_effect). You might have encountered the stimuli, with the typical task to spell out loud as fast as possible written color names:
