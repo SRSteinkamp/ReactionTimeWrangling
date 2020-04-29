@@ -1,0 +1,497 @@
+---
+title: "Reaction Time Analysis"
+author: Simon R. Steinkamp
+data: 2020-04-30
+bibliography: Modeling.bib
+output: 
+  html_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+---
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# dependencies
+library(ggplot2)
+library(retimes)
+library(progress)
+library(crosstalk)
+library(plotly)
+library(rlist)
+library(dplyr)
+library(DT)
+library(knitr)
+library(kableExtra)
+library(tidyr)
+library(sjPlot)
+library(sjmisc)
+library(sjlabelled)
+
+interactive = F
+set.seed(2121)
+```
+
+** This is the non-interactive Version of the analysis!** 
+You can find the interactive notebook [here](https://github.com/SRSteinkamp/ReactionTimeWrangling/exgauss/Reaction-Time-Ex-Gauss-I.html), **caution** it's about 7MB in size, so not your average website!
+
+All code can be found in rmarkdown documents on Github [https://github.com/SRSteinkamp/ReactionTimeWrangling/exgauss](https://github.com/SRSteinkamp/ReactionTimeWrangling/exgauss/) 
+# The (not so) easy task of analysing reaction times.
+
+Analyzing reaction times has a long history in psychology and (cognitive) neuroscience. Most people who studied Psychology in university have conducted a classical psychological experiments. For example investigating the [Stroop task](https://en.wikipedia.org/wiki/Stroop_effect). You might have encountered the stimuli, with the typical task to spell out loud as fast as possible written color names:
+
+- $\color{red}{\text{RED}}$
+- $\color{yellow}{\text{BLUE}}$
+- $\color{blue}{\text{YELLOW}}$
+- $\color{green}{\text{GREEN}}$ 
+
+After running such a task, with many more word-color pairs and different participants, a typical question in undergrad might be:
+Are participants significantly faster while reading matching color words ($\color{green}{\text{GREEN}}$) than reading non-matching color words ($\color{blue}{\text{GREEN}}$)? 
+A straightforward answer would be to to average the reaction times in the non-matching and matching conditions for each participant and then compare the two conditions using for example a [paired t-test](https://en.wikipedia.org/wiki/Student%27s_t-test#Paired_samples). Yes, if $p < 0.05$ and no, if $p > 0.05$.
+
+Results are in and everything is fine? If you start wondering, whether this is the *correct* way of analysis, you might find more and  more and **is more**.
+Different discussions about:
+
+- Should conditions across participants be averaged using the mean or the median? 
+- Should data be averaged at all?
+- How to define outliers?
+- ...
+- Could a drift-diffusion model provide the key insights? 
+- ...
+- Is null hypothesis significance testing meaningful?
+
+All of these questions are not really in my main field of expertise (no worries I won't deal with the last one ;) , but I found reading about reaction time analyses weirdly entertaining and very interesting, and I wanted to start with blogging. 
+So here is the first one of a couple of experiments I am planning to do. There is no particular order but all are based on some questions that arose while looking at different papers.
+
+So maybe there is something useful here for you, or not. Or you disagree or have comments, suggestions, etc. please get in touch!
+
+Here is the first part:
+
+# Part 1 - How many trials do I need to fit an Ex-Gauss?
+Data below is generated sampling 100000 observations from two Ex-Gaussian distributions with $\mu=300$, $\sigma=20$, $\tau=300$ (red) and $\mu=500$, $\sigma=50$, $\tau=100$. Note, that both distributions have the same mean of 600 (the black dashed line).
+```{r, echo=FALSE}
+samp_dist1 = rexgauss(100000, mu=300, sigma=20, tau=300)
+samp_dist2 = rexgauss(100000, mu=500, sigma=50, tau=100)
+
+samp_dat <- data.frame(cbind(samp_dist1, samp_dist2)) %>% gather(key='Distribution', value="Sample")
+samp_dat$Sample <- as.numeric(samp_dat$Sample)
+samp_dat$Distribution <- as.factor(samp_dat$Distribution)
+
+#sample_distribution <- data.frame(sample_distribution)
+p <- ggplot(data=samp_dat, mapping=aes(x=Sample, fill=Distribution, y= ..density..)) + 
+    geom_histogram(alpha=0.5, binwidth=20) +
+     geom_vline(aes(xintercept=600), color="black", linetype="dashed", size=1)
+p
+```
+
+The [**Ex**(ponential) **Gauss**(ian) distribution](https://en.wikipedia.org/wiki/Exponentially_modified_Gaussian_distribution), is the sum of a Gaussian distribution parametrized by $\mu$, and $\sigma$, which define the "body" of the distribution, with an Exponential function ($\tau$) describing the skew to the right. The normally distributed body, with a long tail, has been found to closely match the distribution of reaction time data found in many experiments [@palmerWhatAreShapes2011]. While the fit to experimental data seems to be ideal, the parameters itself do not seem to be related to any specific cognitive constructs. At least, the discussion is still ongoing [@spielerLevelsSelectiveAttention2000].
+The strength of fitting distributions to reaction times is seen in the ability to provide a finer description than for example a summary of a certain condition using the mean or the median. Different combinations of the Ex-Gauss parameters $\mu$ and $\tau$, for example can lead to the same mean. So comparing two conditions for example might provide the same summary statistics, but the distributions might have a very different spread and skew. 
+
+If you are interested in checking out more distributions (and more about model fitting, etc.) visit this great page: [https://lindeloev.github.io/shiny-rt/](https://lindeloev.github.io/shiny-rt/)
+
+This is just a quick introduction into why fitting a distribution might provide a better picture of reaction times, but how many trials are necessary per condition?
+
+## Methods
+To simulate data I used the 12 Ex-Gauss distributions used by @millerWarningMedianReaction1988, and many others. 
+My assumption is, that a researcher wants to fit an Ex-Gauss function for each condition and each participant in an experiment. Note that, there are ways to estimate distributions across multiple participants, which seem to be stable, even for small numbers of trials[@ratcliffGroupReactionTime1979], which I am not (yet?) going into. One estimate is that around 100 trials might be needed to get reliable results [@ratcliffGroupReactionTime1979]. 
+
+Here I want to investigate how many trials are needed, and whether there are general biases in the estimation. For most of the analysis I am using the `retimes` package. Data is simulated using `rexgauss` and for model fitting using both the method of moments (`mexgauss`) and maximum likelihood estimation (MLE) `timefit` are used. According to the documentation `timefit` gets its starting parameters using the method of moments.  
+
+I am simulating data from the 12 distributions starting with 10 (maybe a rare-condition, like an oddball), up to 500 trials (a Psychophysicist's dream [@palmerWhatAreShapes2011]). 
+For each of the twelve distributions I sampled different numbers of trials (10, 20, 35, 50, 100, 200, 350, 500) and then estimated the three parameters $\mu$, $\sigma$, $\tau$ using the method of moments and MLE. This processes was repeated 10000 times. 
+
+```{r, echo=FALSE, paged.print=FALSE}
+mil_mu <- c(300, 300, 350, 350, 400, 400, 450, 450, 500, 500, 550, 550)
+mil_sig <- c(20, 50, 20, 50, 20, 50, 20, 50, 20, 50, 20, 50)
+mil_tau <- c(300, 300, 250, 250, 200, 200, 150, 150, 100, 100, 50, 50)
+distribution <- seq(1,12)
+mil_frame <- data.frame(distribution, mil_mu, mil_sig, mil_tau)
+
+kable(mil_frame, format="html", col.names = c("Distribution", "Mu", "Sigma", "Tau"), caption="The 12 distributions used in Miller (1988)") %>%   kable_styling(bootstrap_options = c("striped"))
+```
+```{r, echo=FALSE, message=T}
+# Number of samples to draw.
+samps <- 10000
+# Sample sizes to test
+samp_size <- c(10, 20, 35, 50, 100, 200, 350, 500)
+
+# Check if simulations already exist - if so load data, else recreate
+if (!file.exists('../simulation/gauss_fitting.csv'))
+{
+    cc <- 1
+    pb <- progress_bar$new(total = 12 * length(samp_size) * samps)
+    simulations <- list()
+
+    for (ii in 1:dim(mil_frame)[[1]])
+    {
+        # Assign values according to 
+        tmp_mu <- mil_frame[ii, 2]
+        tmp_sig <- mil_frame[ii, 3]
+        tmp_tau <- mil_frame[ii, 4]
+        
+        for (jj in 1:length(samp_size)[[1]])
+        {
+            tmp_sas <- samp_size[jj]
+            for (nn in 1:samps)
+            {
+                # Draw sample 
+                cur_draw <- rexgauss(tmp_sas, mu = tmp_mu,
+                    sigma = tmp_sig, tau = tmp_tau)
+                # Estimate using moments
+                est_params <- mexgauss(cur_draw)
+                est_params[4] <- tmp_sas
+                est_params[5] <- ii
+                est_params[6] <- 'Moments'
+                # Estimate using MLE, timefit needs a long time!
+                est_params2 <- timefit(cur_draw)@par
+                est_params2[4] <- tmp_sas
+                est_params2[5] <- ii        
+                est_params2[6] <- 'MLE'
+                # Add to parameter list
+                simulations[[cc]] <- as.vector(est_params)
+                cc <- cc + 1
+                simulations[[cc]] <- as.vector(est_params2)
+                cc <- cc + 1
+                # Update progressbar
+                pb$tick()
+                Sys.sleep(1 / 100)
+            }
+        }
+    }
+    # List to dataframe
+    simulations <- data.frame(matrix(unlist(simulations), 
+                                   nrow = length(simulations),
+                                   byrow = T))
+    # Make pretty and save
+    colnames(simulations) <- c("mu", "sigma", "tau", "sample_size", "distribution", 'method')
+    write.csv(simulations, '../simulation/gauss_fitting.csv')
+    # Seemed to be the easiest hack to circumvent weird formatting in step
+    simulations <- read.csv('../simulation/gauss_fitting.csv')
+} else {
+    simulations <- read.csv('../simulation/gauss_fitting.csv')
+}
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+num_hist <- 40 # The number of histograms to extract
+
+calc_hist <- function(x, n_bins) {
+    # Needed a helper function for histograms, so that an equal number of bins is created
+    hist_data = hist(x, breaks = seq(min(x), max(x), length.out = n_bins), plot=FALSE)
+  return(data.frame(cbind(hist_data$mids, hist_data$counts)))
+}
+
+# Calculating histograms for the simulated data (above)
+histograms <- list()
+c <- 1
+# Nested for-loops (great)
+for (dis in unique(simulations$distribution)) {
+    # Only a small number of sample sizes so that the animation doesn't grow too big
+    for (samp in c(20, 100, 500)) {
+        
+        for (reg in c('mu', 'sigma', 'tau')) {
+            
+            for (fim in unique(simulations$method)) {
+                # Filter simulations 
+                tmp_data <- simulations %>% filter(distribution == dis & 
+                                                   sample_size == samp & 
+                                                   method==fim) %>%
+                                            select(all_of(reg))
+                tmp_hist = calc_hist(tmp_data[,], num_hist)
+                # Add the data
+                tmp_hist[, 3] <- reg
+                tmp_hist[, 4] <- samp
+                tmp_hist[, 5] <- dis
+                tmp_hist[, 6] <- fim
+                # And make pretty
+                colnames(tmp_hist) <- c('mid_points', 'counts', 'parameter', 
+                                   'sample_size', 'distribution', 'method')
+                histograms[[c]] <- tmp_hist
+                c <- c + 1 
+            }
+        }
+    }
+}
+# Concatenate data into a single dataframe
+histograms <- bind_rows(histograms) 
+```
+# Results
+The histograms below describe our simulation results. Feel free to click around (in the interactive version) and select different distributions and methods. 
+From our visual inspection we can see that using a small number of trials can lead to quite some biases in the estimated parameters. The spread of estimated parameters decreases the more samples are considered. The data in the histograms is filtered to only include parameter estimates  greater than 0 and less than 750. The histograms are calculated so that 40 bins for each sample are estimated and only for sample sizes  of 20, 100, 500). This might not be the best way to display the data, but was done to keep the size of the HTML as small as possible. Furthermore, some data cleaning had to be performed as there are raw-events with very unlikely parameter estimates.
+In the non-interactive version, there estimates for distribution 6 only, however you can see `Moments` and `MLE` side by side.
+
+## Interactive Version Legend
+I couldn't figure out how to put meaningful legends on the interactive version:
+* red estimates for $\mu$, solid bars distribution $\mu$
+* blue estimates for $\tau$, dotted bars distribution $\tau$
+* green estimates for $\sigma$, dashed bars distribution $\sigma$
+```{r, messages=FALSE, echo=FALSE, warning=FALSE}
+# Add information about the true values
+mil_long <- mil_frame %>% gather(-distribution, key='parameter', value='val')
+mil_long <- rbind(mil_long, mil_long)
+mil_long$method <- "MLE"
+mil_long$method[1:36] <- "Moments"
+# Max value to adjust text
+max_count <- max(histograms$counts)
+
+hist_filt <- histograms %>% filter(mid_points < 750 & mid_points > 0) %>% mutate(counts=as.integer(counts))
+if (interactive){
+    
+# Put histogram into a shared object, so that we can select different features
+shared_hist <- SharedData$new(hist_filt, ~interaction(distribution, method), group='choose dist')
+shared_mil <- SharedData$new(mil_long, ~interaction(distribution, method), group='choose dist')
+# Create a plot, group is based on the interaction of distribution and method
+gg <- ggplot(shared_hist, aes(group=interaction(distribution, method))) + 
+    facet_grid(rows=vars(sample_size)) +
+            # To not use histograms (too much data, lineplot)
+            geom_area(mapping=(aes(x=mid_points, y=counts, fill=parameter, color=parameter, text=paste0(parameter))), alpha=0.5) +
+            geom_segment(shared_mil, mapping=aes(group=interaction(distribution, method), x=val, xend=val, y=0, yend=max_count/2, linetype=parameter, text=paste0(parameter)), show.legend = FALSE) +
+    theme(legend.position = "none")
+            
+# Bscols  - To arange widgets in columns
+    # Add filter bar for method
+    # Add plot as ggplotly
+layout_ggplotly <- function(gg, x = -0.08, y = -0.08){
+  # The 1 and 2 goes into the list that contains the options for the x and y axis labels respectively
+  gg[['x']][['layout']][['annotations']][[1]][['y']] <- x
+  gg[['x']][['layout']][['annotations']][[2]][['x']] <- y
+  gg
+}
+
+bscols(
+    filter_select("id", "Select Estimation Procedure", shared_hist, ~c(method), multiple = F),
+    filter_select("id", "Select Distribution", shared_hist, ~c(distribution), multiple = F),
+ggplotly(gg, dynamicTicks = TRUE, hoverinfo="text", originalData=FALSE, tooltip = c("text", "x", "y", "group")) %>%
+    layout_ggplotly() %>%
+    config(modeBarButtonsToRemove = c("zoomIn2d", "zoomOut2d", "toggleSpikelines", "toggleHover")),
+    widths =c(6, 6, 12)
+)
+# Plot non interactive plot
+} else{
+    gg <- hist_filt %>% 
+        filter(distribution == 6) %>%
+        ggplot(aes(fill=parameter, color=parameter)) + 
+            facet_grid(rows=vars(sample_size), cols=vars(method)) + 
+
+            # To not use histograms (too much data, lineplot)
+            geom_area(mapping=aes(x=mid_points, y=counts), alpha=0.5) +
+            geom_segment(mil_long %>% filter(distribution==6), mapping=aes(x=val, xend=val, y=0, yend=max_count/2, linetype=parameter, text=paste0(parameter)), show.legend = TRUE) 
+    gg
+}
+```
+To get an estimate of how well (or bad) the modeling performed, I calculated the **mean** error to investigate general trends, its standard-deviation (**SD**), and the mean absolute error for error estimation (**MAE**).
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# Join mil_frame and dist_list
+join_list <- inner_join(simulations, mil_frame)
+
+mut_list <- join_list %>% 
+    filter(mu > -1e6 & mu < 1e6 & tau > -1e6 & tau < 1e6 & sigma > -1e6 & sigma < 1e6) %>%
+    mutate(mu = mu - mil_mu, tau = tau - mil_tau, sigma = sigma - mil_sig) %>%
+    select(distribution, sample_size, method, mu, tau, sigma) %>%
+    gather(key='parameter', value="estimate", mu, tau, sigma)
+
+estimate_summary <- mut_list %>% group_by(sample_size, distribution, method, parameter) %>% 
+    summarize(mean = mean(estimate), mae = mean(abs(estimate)), SD = sd(estimate)) %>%
+    gather(key='statistic', value='error', mean, mae, SD) %>% 
+    ungroup() %>% 
+    mutate(distribution = as.factor(distribution))
+
+estimate_sum_round <- estimate_summary %>% 
+    mutate_if(is.numeric, round, 2) %>%
+    mutate(sample_size = as.factor(sample_size), statistic = as.factor(statistic)) %>%
+    spread(key='parameter',  'error')
+
+```
+
+There is unfortunately, too much data to have good look at, so here is a `datatable` to play around with and investigate some of the summary values (in the interactive version only). Data can be created using the `.Rmd` files in the [Repro](https://github.com/SRSteinkamp/ReactionTimeWrangling/exgauss/) 
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+if (interactive) {
+datatable(estimate_sum_round, filter = 'top', options = list(dom ='Bfrtip', buttons = c('copy', 'csv'),
+  deferRender = T,
+  scrollY = 250,
+  scroller = TRUE), 
+  extensions = c('Buttons', 'Scroller'))
+}
+```
+
+## Analysis
+
+Plotting the summaries for the estimations and pooling over distributions, we can draw first (maybe obvious) conclusions:
+
+* larger sample sizes, lead to less error
+* maximum likelihood estimation performs generally better, than the method of moments.
+
+Interestingly, regardless of estimation procedure, the $\sigma$ and $\mu$ parameters seem to be overestimated, whereas $\tau$ is underestimated.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+estimate_summary %>% filter(statistic != "SD") %>%
+     mutate(sample_size = as.factor(sample_size)) %>%
+ggplot(aes(x=sample_size, y=error, color=method)) +
+    facet_grid(cols=vars(statistic), rows=vars(parameter)) +
+    geom_boxplot() + 
+    geom_hline(mapping=aes(yintercept=0))
+```
+
+### Statistical Summary
+
+```{r, echo=FALSE, warning=F, message=FALSE}
+mil_frame_diff <- mil_frame %>% mutate(diff_mt = mil_mu - mil_tau, distribution = as.factor(distribution))
+
+estimate_summary_dummy <- inner_join(estimate_summary, mil_frame_diff)
+
+```
+#### How strong are the observed biaes?
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+m0 <- estimate_summary_dummy %>% 
+                    filter(statistic=="mean") %>% 
+                    lm(error ~ parameter * method+ 0, .)
+                    
+m0 <- tab_model(m0)
+
+m0
+```
+As we have already seen in the figure, we confirm that $\mu$ is generally overestimated while, $\tau$ is underestimated. This makes sense given the distribution of the data: The majority of data will be sampled from the Gaussian part of the distribution, so  extreme-values are relatively rare. It is therefore much harder to correctly estimate the skew ($\tau$). As the mean of the Ex-Gaussian is given by $\mu + \tau$, a underestimation of $\tau$ automatically leads to a larger estimate of $\mu$. 
+
+Also, the method of moments seems to be more prone to biases, especially leading to an overestimation of $\sigma$.
+
+#### What can we learn about the error?
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+m1 <- estimate_summary_dummy %>% 
+                    filter(statistic=="mae" & parameter=="mu") %>% 
+                    rename(MAE_Mu=error) %>%
+                    lm(MAE_Mu ~ method * diff_mt + sample_size + 0, .)
+
+m2 <- estimate_summary_dummy %>% 
+                    filter(statistic=="mae" & parameter=="tau") %>% 
+                    rename(MAE_Tau=error) %>%
+                    lm(MAE_Tau ~ method * diff_mt + sample_size + 0, .)
+
+m3 <- estimate_summary_dummy %>% 
+                    filter(statistic=="mae" & parameter=="sigma") %>%
+                    rename(MAE_Sigma=error) %>%
+                    lm(MAE_Sigma ~ method * diff_mt + sample_size + 0, .)
+
+tab_model(m1, m2, m3)
+```
+
+
+All factors which were included in the model appear to have some meaning (are significant). As we have seen in the other analysis, the method of moments has a higher base MAE rate than the maximum likelihood estimation. Furthermore, we can see that $\mu$ and $\tau$ are easier identifiable the farther they are apart, especially when the method of moments is used. This is expressed by the regressor $\text{diff_mt} = \mu - \tau$ (based on the original distributions). And again: larger sample sizes are the key factor to reduce the error! 
+
+# Conclusion
+
+If you want to get a good estimate of the reaction time distribution: **collect enough data!**
+
+To provide a bit more nuance, you can get away with small sample sizes, if you are lucky. For example if the reaction time distribution isn't very skewed. But keep in mind, that you can expect a higher error in the estimation of the true parameters (especially using the method of moments), when $\tau$ and $\mu$ are close to each other. 
+Looking at the histograms, we also see that there is a lot of variance in the estimation of $\sigma$. So further analyzing $\sigma$, for example in a group analysis, should be done very carefully.
+Last but not least, sample sizes should be equal when comparing $\mu$ and $\tau$ across different conditions! Even if parameters are drawn from the same Ex-Gauss distribution, it is very likely that the condition with less trials will have a higher estimate of these parameters. We can do a small simulation of this using our simulated data.
+ 
+## Type 1 error due to imbalanced sample sizes
+
+For simplicity I decided to only use samples from distribution 6 (with $\mu = 400$, $\tau = 200$, and $\sigma = 50$), estimated by MLE. I am drawing 30 random sets of estimated parameters for different combinations of sample sizes. The number 30 is quite arbitrary but is supposed to reflect a typical number of participants in an reaction time experiment. The parameters of the different distributions are then submitted to a paired two-sided t-test and the number of significant results ($p<0.05$) are reported. In theory, as data is drawn from the same distribution, we should expect around 5% false positive results.
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+# Number of simulations to do for false positive rate
+n_simulations <- 10000
+no_participants <- 30
+# Create pairings
+pair1 <- c(20, 20, 50, 50, 100, 200)
+pair2 <- c(50, 200, 100, 200, 200, 200)
+# store simulations
+fp_sim <- list()
+
+if (!file.exists('../simulation/fp_estimate.csv'))
+{
+data_sel <- simulations %>%
+          filter(distribution==6 & method=='MLE')
+cc <- 1
+
+pb <- progress_bar$new(total = length(pair1) * n_simulations)
+
+for (ps in 1 : length(pair1)){
+  for (n in 1 : n_simulations){
+    # Sample data for pairing
+    smp1 <- data_sel %>%
+            filter(sample_size == pair1[ps]) %>%
+          sample_n(no_participants)
+    smp2 <- data_sel %>%
+            filter(sample_size == pair2[ps]) %>%
+          sample_n(no_participants)
+    
+    res1_ <- t.test(smp1$mu, smp2$mu, paired=TRUE)
+    res2_ <- t.test(smp1$tau, smp2$tau, paired=TRUE)
+    
+    res1 <- res1_$p.value
+    res1[2] <- res1_$statistic
+    res1[3] <- paste(c(ps, "-", pair1[ps], ":", pair2[ps]), collapse = " ")
+    res1[4] <- 'mu'
+    res2 <- res2_$p.value
+    res2[2] <- res2_$statistic
+    res2[3] <- paste(c(ps, "-", pair1[ps], ":", pair2[ps]), collapse = " ")
+    res2[4] <- 'tau'
+    fp_sim[[cc]] <- as.vector(res1)
+    cc <- cc + 1
+    fp_sim[[cc]] <- as.vector(res2)
+    cc <- cc + 1
+    pb$tick()
+    Sys.sleep(1/100)
+  }
+}
+fp_sim <- data.frame(matrix(unlist(fp_sim), 
+                                   nrow = length(fp_sim),
+                                   byrow = T))
+# Make pretty and save
+colnames(fp_sim) <- c("p", "t", "pair", "param")
+write.csv(fp_sim, '../simulation/fp_estimate.csv')
+# Seemed to be the easiest hack to circumvent weird formatting in step
+fp_sim <- read.csv('../simulation/fp_estimate.csv')
+
+} else {
+    fp_sim <- read.csv('../simulation/fp_estimate.csv')
+}
+
+```
+Histogram of the simulation results. We can see that the first two pairs have many false positives ($p < 0.05$, left of the black line). The later pairings on the other hand seem to have a rather uniform distribution of p-values (as we would expect). The pairings (e.g., 20 : 50) show on how many trials the parameters in condition 1 (20) and in condition 2 (50) were estimated. The paired t-tests were then calculated as condition 1 > condition 2. 
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+fp_sim %>% 
+  mutate(pair = as.factor(pair)) %>% 
+ggplot() + 
+  geom_histogram(aes(fill=pair, x=p), breaks= seq(0, 1, 0.05), alpha=0.5, position='identity') +
+  facet_grid(rows=vars(param)) + 
+  geom_vline(aes(xintercept=0.05))
+```
+For completeness sake I also calculated the average t-value for each of the pairing, next to the proportion of false positive results. 
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+fp1 <- fp_sim %>% 
+          mutate(p = p < 0.05) %>%
+  group_by(pair, param) %>%
+  summarize(p = mean(p)) %>% 
+  spread(key=param, value=p) %>% ungroup()
+fp2 <- fp_sim %>% 
+  group_by(pair, param) %>%
+  summarize(t = mean(t)) %>% 
+  spread(key=param, value=t) %>% ungroup()
+
+z <- cbind(fp1, fp2)
+z$pair <- NULL
+z <- z[, c(3, 1, 4, 2, 5)]
+
+z %>% 
+  mutate_if(is.numeric, round, 3) %>%
+kable(caption='Propotions of simulations with p < 0.05 and average t-value', col.names=c('Pairing', 'Mu_p', 'Mu_t', 'Tau_p', 'Tau_t')) %>%
+  
+kable_styling(bootstrap_options = c("striped"))
+```
+As assumed, we have a inflation of false-positive t-tests when comparing estimates of Ex-Gauss parameters from the same distribution (but estimated using different sample-sizes). The larger the imbalance, the larger the false positive rate!
+
+## Conclusions not related to analysis
+This is the first larger project I conducted in R(markdown). 
+I really don't like the basic R syntax in many regards, but using `dplyr` and the rest of the `tidyverse` is great :)  `%>%` it all the way!
+Building interactive figures with `ggplot2` + `plotly` + `crosstalk` is also quite amazing. But as I did not want to create a shiny app, figuring out how to deal with exploding sizes of .html files took me quite some time.
+
+# References
